@@ -1,0 +1,13 @@
+{
+  "name": "genadup",
+  "version": "0.1.0",
+  "description": "Guided Geneanet ancestor import assistant.",
+  "type": "module",
+  "scripts": {
+    "discover": "node src/genadup.mjs discover",
+    "guided": "node src/genadup.mjs guided"
+  },
+  "dependencies": {
+    "playwright": "latest"
+  }
+}

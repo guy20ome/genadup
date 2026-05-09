@@ -1,0 +1,341 @@
+// ==UserScript==
+// @name         genadup Geneanet guided importer
+// @namespace    https://github.com/guy20ome/genadup
+// @version      0.1.0
+// @description  Guided queue for importing Geneanet linked-tree ancestors with "Importer dans mon arbre".
+// @match        https://gw.geneanet.org/*
+// @grant        none
+// ==/UserScript==
+
+(() => {
+  "use strict";
+
+  const STORAGE_KEY = "genadup.queue.v1";
+  const PANEL_ID = "genadup-panel";
+
+  const state = loadState();
+  const current = readCurrentPerson();
+  const parents = readParents();
+
+  renderPanel();
+
+  function renderPanel() {
+    document.getElementById(PANEL_ID)?.remove();
+
+    const panel = document.createElement("div");
+    panel.id = PANEL_ID;
+    panel.innerHTML = `
+      <style>
+        #${PANEL_ID} {
+          position: fixed;
+          right: 14px;
+          bottom: 14px;
+          z-index: 2147483647;
+          width: 360px;
+          max-width: calc(100vw - 28px);
+          color: #1f2933;
+          background: #ffffff;
+          border: 1px solid #b8c2cc;
+          border-radius: 8px;
+          box-shadow: 0 12px 32px rgba(0, 0, 0, 0.2);
+          font: 13px/1.35 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+        #${PANEL_ID} header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 10px 12px;
+          color: #ffffff;
+          background: #0f5f58;
+          border-radius: 7px 7px 0 0;
+          font-weight: 700;
+        }
+        #${PANEL_ID} main { padding: 10px 12px 12px; }
+        #${PANEL_ID} button {
+          border: 1px solid #9aa5b1;
+          background: #f5f7fa;
+          color: #1f2933;
+          border-radius: 6px;
+          padding: 6px 8px;
+          cursor: pointer;
+          font: inherit;
+        }
+        #${PANEL_ID} button.primary {
+          background: #0f5f58;
+          border-color: #0f5f58;
+          color: #ffffff;
+        }
+        #${PANEL_ID} button.danger {
+          background: #fff5f5;
+          border-color: #d64545;
+          color: #9b1c1c;
+        }
+        #${PANEL_ID} .row {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+          margin-top: 8px;
+        }
+        #${PANEL_ID} .muted { color: #52606d; }
+        #${PANEL_ID} .person {
+          font-weight: 700;
+          margin-bottom: 4px;
+        }
+        #${PANEL_ID} ul {
+          margin: 6px 0 0 18px;
+          padding: 0;
+          max-height: 90px;
+          overflow: auto;
+        }
+        #${PANEL_ID} textarea {
+          width: 100%;
+          min-height: 120px;
+          box-sizing: border-box;
+          margin-top: 8px;
+          font: 12px ui-monospace, SFMono-Regular, Consolas, monospace;
+        }
+      </style>
+      <header>
+        <span>genadup</span>
+        <button type="button" data-action="hide" title="Hide">x</button>
+      </header>
+      <main>
+        <div class="muted">Current person</div>
+        <div class="person">${escapeHtml(current.name || "Unknown page")}</div>
+        <div class="muted">Parents found: ${parents.length}</div>
+        ${parents.length ? `<ul>${parents.map((parent) => `<li>${escapeHtml(parent.name)}</li>`).join("")}</ul>` : ""}
+        <div class="muted" style="margin-top:8px">
+          Queue: ${state.queue.length} waiting, ${Object.keys(state.done).length} done
+        </div>
+        <div class="row">
+          <button type="button" class="primary" data-action="start">Start/reset here</button>
+          <button type="button" data-action="import">Open import</button>
+          <button type="button" data-action="done">Done + next</button>
+          <button type="button" data-action="skip">Skip + next</button>
+        </div>
+        <div class="row">
+          <button type="button" data-action="next">Open next</button>
+          <button type="button" data-action="export">Export report</button>
+          <button type="button" class="danger" data-action="clear">Clear queue</button>
+        </div>
+        <div data-output></div>
+      </main>
+    `;
+
+    panel.addEventListener("click", onPanelClick);
+    document.body.append(panel);
+  }
+
+  function onPanelClick(event) {
+    const action = event.target?.dataset?.action;
+    if (!action) return;
+
+    if (action === "hide") document.getElementById(PANEL_ID)?.remove();
+    if (action === "start") startHere();
+    if (action === "import") openImport();
+    if (action === "done") finishCurrent("imported");
+    if (action === "skip") finishCurrent("skipped");
+    if (action === "next") openNext();
+    if (action === "export") exportReport();
+    if (action === "clear") clearQueue();
+  }
+
+  function startHere() {
+    state.queue = [{ ...current, generation: 0, relation: "start" }];
+    state.done = {};
+    state.current = null;
+    state.report = [];
+    saveState();
+    openNext();
+  }
+
+  function openImport() {
+    state.current = {
+      ...current,
+      parents,
+      openedAt: new Date().toISOString(),
+    };
+    saveState();
+
+    const importLink = findImportLink();
+    if (importLink) {
+      location.href = importLink.href;
+      return;
+    }
+
+    const plus = findLinkByText("Plus");
+    if (plus) {
+      plus.click();
+      setTimeout(() => {
+        const delayedImportLink = findImportLink();
+        if (delayedImportLink) location.href = delayedImportLink.href;
+        else alert('Could not find "Importer dans mon arbre". Open it manually, then use Done + next.');
+      }, 450);
+      return;
+    }
+
+    alert('Could not find "Plus" or "Importer dans mon arbre". Open the import manually, then use Done + next.');
+  }
+
+  function finishCurrent(status) {
+    const imported = state.current || { ...current, parents };
+    const key = personKey(imported.url);
+    state.done[key] = true;
+    state.report.push({
+      status,
+      generation: imported.generation ?? current.generation ?? "",
+      name: imported.name,
+      url: imported.url,
+      parents: (imported.parents || parents).map((parent) => parent.name).join(" | "),
+      time: new Date().toISOString(),
+    });
+
+    for (const parent of imported.parents || parents) {
+      const parentKey = personKey(parent.url);
+      if (state.done[parentKey]) continue;
+      if (state.queue.some((item) => personKey(item.url) === parentKey)) continue;
+      state.queue.push({
+        ...parent,
+        generation: Number(imported.generation || 0) + 1,
+        relation: `parent of ${imported.name}`,
+      });
+    }
+
+    state.current = null;
+    saveState();
+    openNext();
+  }
+
+  function openNext() {
+    while (state.queue.length) {
+      const next = state.queue.shift();
+      if (state.done[personKey(next.url)]) continue;
+      state.current = next;
+      saveState();
+      location.href = next.url;
+      return;
+    }
+    saveState();
+    alert("Queue is empty. Use Export report to save the log.");
+    renderPanel();
+  }
+
+  function exportReport() {
+    const output = document.querySelector(`#${PANEL_ID} [data-output]`);
+    output.innerHTML = `<textarea readonly>${escapeHtml(toCsv(state.report))}</textarea>`;
+  }
+
+  function clearQueue() {
+    if (!confirm("Clear the genadup queue and report?")) return;
+    localStorage.removeItem(STORAGE_KEY);
+    location.reload();
+  }
+
+  function readCurrentPerson() {
+    const heading = document.querySelector("h1");
+    const name =
+      cleanText(heading?.textContent).replace(/^(Homme|Femme)\s+/i, "") ||
+      cleanText(document.title.split(":")[0]);
+    return {
+      name,
+      url: normalizePersonUrl(location.href),
+      generation: state.current?.generation || 0,
+      relation: state.current?.relation || "",
+    };
+  }
+
+  function readParents() {
+    const parentHeading = Array.from(document.querySelectorAll("h2, h3")).find((heading) =>
+      /^Parents\b/i.test(cleanText(heading.textContent))
+    );
+    if (!parentHeading) return [];
+
+    const found = [];
+    let node = parentHeading.nextElementSibling;
+    while (node && !/^H[23]$/i.test(node.tagName)) {
+      for (const link of node.querySelectorAll("a[href]")) {
+        const url = new URL(link.getAttribute("href"), location.href);
+        if (!url.hostname.endsWith("geneanet.org")) continue;
+        if (!url.searchParams.has("p") || !url.searchParams.has("n")) continue;
+        if (url.searchParams.has("m")) continue;
+        const parent = { name: cleanText(link.textContent), url: normalizePersonUrl(url.href) };
+        if (!parent.name || found.some((item) => item.url === parent.url)) continue;
+        found.push(parent);
+      }
+      node = node.nextElementSibling;
+    }
+    return found;
+  }
+
+  function findImportLink() {
+    return Array.from(document.querySelectorAll("a[href], button")).find((element) =>
+      /Importer dans mon arbre/i.test(cleanText(element.textContent))
+    );
+  }
+
+  function findLinkByText(text) {
+    return Array.from(document.querySelectorAll("a, button")).find(
+      (element) => cleanText(element.textContent) === text
+    );
+  }
+
+  function loadState() {
+    try {
+      return {
+        queue: [],
+        done: {},
+        current: null,
+        report: [],
+        ...JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}"),
+      };
+    } catch {
+      return { queue: [], done: {}, current: null, report: [] };
+    }
+  }
+
+  function saveState() {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  }
+
+  function normalizePersonUrl(rawUrl) {
+    const url = new URL(rawUrl, location.href);
+    url.protocol = "https:";
+    if (!url.searchParams.get("lang")) url.searchParams.set("lang", "fr");
+    url.searchParams.delete("type");
+    return url.href;
+  }
+
+  function personKey(rawUrl) {
+    const url = new URL(normalizePersonUrl(rawUrl));
+    return [
+      url.pathname.toLowerCase(),
+      (url.searchParams.get("p") || "").toLowerCase(),
+      (url.searchParams.get("n") || "").toLowerCase(),
+      url.searchParams.get("oc") || "",
+    ].join("|");
+  }
+
+  function toCsv(rows) {
+    const headers = ["status", "generation", "name", "url", "parents", "time"];
+    return [
+      headers.join(","),
+      ...rows.map((row) => headers.map((header) => csvCell(row[header] || "")).join(",")),
+    ].join("\n");
+  }
+
+  function csvCell(value) {
+    const text = String(value);
+    if (!/[",\n]/.test(text)) return text;
+    return `"${text.replaceAll('"', '""')}"`;
+  }
+
+  function cleanText(text) {
+    return (text || "").replace(/\s+/g, " ").trim();
+  }
+
+  function escapeHtml(text) {
+    return String(text).replace(/[&<>"']/g, (char) => {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[char];
+    });
+  }
+})();
