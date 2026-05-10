@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         genadup Geneanet guided importer
 // @namespace    https://github.com/guy20ome/genadup
-// @version      0.1.2
+// @version      0.2.0
 // @description  Guided queue for importing Geneanet linked-tree ancestors with "Importer dans mon arbre".
 // @match        https://gw.geneanet.org/*
 // @grant        none
@@ -18,6 +18,9 @@
   const parents = readParents();
 
   renderPanel();
+  if (state.agent?.running) {
+    setTimeout(agentStep, 900);
+  }
 
   function renderPanel() {
     document.getElementById(PANEL_ID)?.remove();
@@ -116,6 +119,8 @@
         </div>
         <div class="row">
           <button type="button" class="primary" data-action="start">Start/reset here</button>
+          <button type="button" class="primary" data-action="agent-start">Run agent</button>
+          <button type="button" data-action="agent-stop">Stop</button>
           <button type="button" data-action="import">Open import</button>
           <button type="button" data-action="done">Done + next</button>
           <button type="button" data-action="skip">Skip + next</button>
@@ -140,6 +145,8 @@
 
     if (action === "hide") document.getElementById(PANEL_ID)?.remove();
     if (action === "start") startHere();
+    if (action === "agent-start") startAgent();
+    if (action === "agent-stop") stopAgent("Agent stopped.");
     if (action === "import") openImport();
     if (action === "done") finishCurrent("imported");
     if (action === "skip") finishCurrent("skipped");
@@ -154,8 +161,123 @@
     state.done = {};
     state.current = null;
     state.report = [];
+    state.agent = { running: false, autoValidate: false, steps: 0, log: [] };
     saveState();
     openNext();
+  }
+
+  function startAgent() {
+    const autoValidate = confirm(
+      "Let genadup click Geneanet validation buttons automatically?\n\nOK = agent may validate imports.\nCancel = agent opens/imports fields, then stops before final validation."
+    );
+    state.agent = {
+      running: true,
+      autoValidate,
+      steps: 0,
+      log: [],
+      currentKey: personKey(location.href),
+    };
+    saveState();
+    agentLog(`Agent started. Auto-validate: ${autoValidate ? "yes" : "no"}.`);
+    setTimeout(agentStep, 250);
+  }
+
+  function stopAgent(message) {
+    state.agent = { ...(state.agent || {}), running: false };
+    saveState();
+    setStatus(message);
+  }
+
+  function agentStep() {
+    if (!state.agent?.running) return;
+    state.agent.steps = Number(state.agent.steps || 0) + 1;
+    state.agent.currentKey = personKey(location.href);
+    if (state.agent.steps > 250) {
+      stopAgent("Agent stopped after 250 steps to avoid looping.");
+      return;
+    }
+
+    if (consumeAgentPostValidate()) return;
+
+    const pageUrl = new URL(location.href);
+    if (pageUrl.searchParams.has("type")) {
+      pageUrl.searchParams.delete("type");
+      agentNavigate(pageUrl.href, "Opening person fiche.");
+      return;
+    }
+
+    if (isGeneanetImportPage()) {
+      handleImportPage();
+      return;
+    }
+
+    const importLink = findImportLink();
+    if (importLink) {
+      agentLog("Opening import command.");
+      activateImportElement(importLink);
+      return;
+    }
+
+    const plus = findMenuButton("Plus");
+    if (plus) {
+      agentLog('Opening "Plus" menu.');
+      plus.click();
+      setTimeout(() => {
+        const delayedImportLink = findImportLink();
+        if (delayedImportLink) {
+          agentLog("Import command found after opening Plus.");
+          activateImportElement(delayedImportLink);
+        } else {
+          stopAgent('Agent stopped: "Plus" opened, but no import command was found.');
+        }
+      }, 900);
+      return;
+    }
+
+    stopAgent("Agent stopped: no import command or Plus menu found on this page.");
+  }
+
+  function handleImportPage() {
+    const importControls = findImportFieldControls();
+    if (importControls.length) {
+      agentLog(`Clicking ${importControls.length} import field control(s).`);
+      for (const control of importControls.slice(0, 20)) {
+        control.click();
+      }
+      setTimeout(agentStep, 900);
+      return;
+    }
+
+    const validateControl = findValidateControl();
+    if (!validateControl) {
+      stopAgent("Agent stopped: import page detected, but no field or validation controls were found.");
+      return;
+    }
+
+    if (!state.agent.autoValidate) {
+      stopAgent("Agent paused before final validation. Review Geneanet, then click validation manually or rerun with auto-validation.");
+      return;
+    }
+
+    state.agent.awaitingPostValidate = {
+      person: state.current || current,
+      parents,
+      url: normalizePersonUrl(location.href),
+    };
+    saveState();
+    agentLog("Clicking validation control.");
+    validateControl.click();
+  }
+
+  function consumeAgentPostValidate() {
+    if (!state.agent?.awaitingPostValidate) return false;
+    const imported = state.agent.awaitingPostValidate.person || state.current || current;
+    state.agent.awaitingPostValidate = null;
+    saveState();
+    finishCurrent("agent-imported");
+    if (!state.agent?.running) return true;
+    setTimeout(agentStep, 1200);
+    return true;
   }
 
   function openImport() {
@@ -256,7 +378,8 @@
     const output = document.querySelector(`#${PANEL_ID} [data-output]`);
     const candidates = findActionCandidates();
     const debug = {
-      version: "0.1.2",
+      version: "0.2.0",
+      agent: state.agent || null,
       url: location.href,
       normalizedUrl: normalizePersonUrl(location.href),
       current,
@@ -335,6 +458,44 @@
     );
   }
 
+  function visibleActionElements() {
+    return actionElements().filter((element) => isVisible(element) && !isDisabled(element));
+  }
+
+  function isGeneanetImportPage() {
+    const text = cleanText(document.body?.textContent || "");
+    const url = location.href;
+    return (
+      /import/i.test(url) ||
+      /importer dans (mon|votre|un) arbre/i.test(text) ||
+      visibleActionElements().some((element) => isValidationCandidate(element))
+    );
+  }
+
+  function findImportFieldControls() {
+    return visibleActionElements().filter((element) => {
+      const label = elementLabel(element);
+      if (isValidationCandidate(element)) return false;
+      if (isGlobalNavigationImport(element)) return false;
+      return /^(importer|copier|ajouter)$/i.test(label) || /importer|copier|ajouter/i.test(label);
+    });
+  }
+
+  function findValidateControl() {
+    return visibleActionElements().find((element) => isValidationCandidate(element));
+  }
+
+  function isValidationCandidate(element) {
+    const label = elementLabel(element);
+    return /^(valider|enregistrer|confirmer|terminer|continuer|importer)$/i.test(label);
+  }
+
+  function isGlobalNavigationImport(element) {
+    const label = elementLabel(element);
+    const href = element.href || "";
+    return /gedcom/i.test(label) || /Importer mon arbre \(Gedcom\)/i.test(label) || /\/import/i.test(href);
+  }
+
   function isImportCandidate(element) {
     const text = cleanText(element.textContent);
     const href = element.href || "";
@@ -362,6 +523,25 @@
         )
       )
       .slice(0, 80);
+  }
+
+  function agentNavigate(url, message) {
+    agentLog(message);
+    saveState();
+    location.href = url;
+  }
+
+  function agentLog(message) {
+    state.agent = state.agent || { running: false, autoValidate: false, steps: 0, log: [] };
+    state.agent.log = state.agent.log || [];
+    state.agent.log.push({
+      time: new Date().toISOString(),
+      url: location.href,
+      message,
+    });
+    state.agent.log = state.agent.log.slice(-40);
+    saveState();
+    setStatus(`${message}<br><br>${escapeHtml(state.agent.log.map((row) => row.message).slice(-6).join("\n"))}`);
   }
 
   function setStatus(message) {
@@ -422,6 +602,29 @@
 
   function cleanText(text) {
     return (text || "").replace(/\s+/g, " ").trim();
+  }
+
+  function elementLabel(element) {
+    return cleanText(
+      [
+        element.getAttribute("aria-label"),
+        element.getAttribute("title"),
+        element.getAttribute("alt"),
+        element.textContent,
+      ]
+        .filter(Boolean)
+        .join(" ")
+    );
+  }
+
+  function isVisible(element) {
+    const style = getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+  }
+
+  function isDisabled(element) {
+    return element.disabled || element.getAttribute("aria-disabled") === "true";
   }
 
   function escapeHtml(text) {
