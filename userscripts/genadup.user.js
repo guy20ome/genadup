@@ -18,6 +18,7 @@
   const parents = readParents();
 
   renderPanel();
+  maybeContinuePendingImport();
 
   function renderPanel() {
     document.getElementById(PANEL_ID)?.remove();
@@ -77,6 +78,13 @@
           margin-top: 8px;
         }
         #${PANEL_ID} .muted { color: #52606d; }
+        #${PANEL_ID} .status {
+          margin-top: 8px;
+          padding: 7px 8px;
+          background: #eef8f7;
+          border: 1px solid #b9e3df;
+          border-radius: 6px;
+        }
         #${PANEL_ID} .person {
           font-weight: 700;
           margin-bottom: 4px;
@@ -127,7 +135,7 @@
   }
 
   function onPanelClick(event) {
-    const action = event.target?.dataset?.action;
+    const action = event.target?.closest("[data-action]")?.dataset?.action;
     if (!action) return;
 
     if (action === "hide") document.getElementById(PANEL_ID)?.remove();
@@ -150,6 +158,7 @@
   }
 
   function openImport() {
+    setStatus("Looking for Geneanet's import command...");
     state.current = {
       ...current,
       parents,
@@ -157,24 +166,42 @@
     };
     saveState();
 
+    const pageUrl = new URL(location.href);
+    if (pageUrl.searchParams.has("type")) {
+      pageUrl.searchParams.delete("type");
+      state.pendingImport = personKey(pageUrl.href);
+      saveState();
+      setStatus("Opening the person fiche first, then I will retry import.");
+      location.href = pageUrl.href;
+      return;
+    }
+
     const importLink = findImportLink();
     if (importLink) {
-      location.href = importLink.href;
+      activateImportElement(importLink);
       return;
     }
 
-    const plus = findLinkByText("Plus");
+    const plus = findMenuButton("Plus");
     if (plus) {
       plus.click();
+      setStatus('Opened "Plus"; looking for the import entry...');
       setTimeout(() => {
         const delayedImportLink = findImportLink();
-        if (delayedImportLink) location.href = delayedImportLink.href;
-        else alert('Could not find "Importer dans mon arbre". Open it manually, then use Done + next.');
-      }, 450);
+        if (delayedImportLink) {
+          activateImportElement(delayedImportLink);
+        } else {
+          setStatus(
+            'I opened "Plus" but did not find an import command. Open "Importer dans mon arbre" manually, then use Done + next.'
+          );
+        }
+      }, 900);
       return;
     }
 
-    alert('Could not find "Plus" or "Importer dans mon arbre". Open the import manually, then use Done + next.');
+    setStatus(
+      'Could not find "Plus" or an import command on this page. Open "Importer dans mon arbre" manually, then use Done + next.'
+    );
   }
 
   function finishCurrent(status) {
@@ -268,15 +295,47 @@
   }
 
   function findImportLink() {
-    return Array.from(document.querySelectorAll("a[href], button")).find((element) =>
-      /Importer dans mon arbre/i.test(cleanText(element.textContent))
+    return Array.from(document.querySelectorAll("a[href], button"))
+      .filter((element) => !element.closest(`#${PANEL_ID}`))
+      .find((element) => {
+        const text = cleanText(element.textContent);
+        const href = element.href || "";
+        return (
+          /importer.*(mon|votre|un).*arbre/i.test(text) ||
+          /copier.*(mon|votre|un).*arbre/i.test(text) ||
+          /ajouter.*(mon|votre|un).*arbre/i.test(text) ||
+          /importer/i.test(href)
+        );
+      });
+  }
+
+  function findMenuButton(text) {
+    return Array.from(document.querySelectorAll("a, button")).find(
+      (element) => !element.closest(`#${PANEL_ID}`) && cleanText(element.textContent) === text
     );
   }
 
-  function findLinkByText(text) {
-    return Array.from(document.querySelectorAll("a, button")).find(
-      (element) => cleanText(element.textContent) === text
-    );
+  function activateImportElement(element) {
+    setStatus(`Opening: ${cleanText(element.textContent) || element.href || "import command"}`);
+    if (element.href) {
+      location.href = element.href;
+      return;
+    }
+    element.click();
+  }
+
+  function maybeContinuePendingImport() {
+    if (!state.pendingImport) return;
+    if (state.pendingImport !== personKey(location.href)) return;
+    state.pendingImport = null;
+    saveState();
+    setTimeout(openImport, 700);
+  }
+
+  function setStatus(message) {
+    const output = document.querySelector(`#${PANEL_ID} [data-output]`);
+    if (!output) return;
+    output.innerHTML = `<div class="status">${escapeHtml(message)}</div>`;
   }
 
   function loadState() {
