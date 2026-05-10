@@ -20,7 +20,7 @@ This is the easiest way to use `genadup`.
 3. Open the linked-tree profile:
 
 ```text
-https://gw.geneanet.org/gntstarnivatanne?lang=fr&n=sgard&oc=0&p=adele+felicie+sidonie&type=tree
+https://gw.geneanet.org/
 ```
 
 4. Click **Start/reset here** in the `genadup` panel.
