@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         genadup Geneanet guided importer
 // @namespace    https://github.com/guy20ome/genadup
-// @version      0.1.0
+// @version      0.1.1
 // @description  Guided queue for importing Geneanet linked-tree ancestors with "Importer dans mon arbre".
 // @match        https://gw.geneanet.org/*
 // @grant        none
