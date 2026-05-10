@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         genadup Geneanet guided importer
 // @namespace    https://github.com/guy20ome/genadup
-// @version      0.1.1
+// @version      0.1.2
 // @description  Guided queue for importing Geneanet linked-tree ancestors with "Importer dans mon arbre".
 // @match        https://gw.geneanet.org/*
 // @grant        none
@@ -18,7 +18,6 @@
   const parents = readParents();
 
   renderPanel();
-  maybeContinuePendingImport();
 
   function renderPanel() {
     document.getElementById(PANEL_ID)?.remove();
@@ -123,6 +122,7 @@
         </div>
         <div class="row">
           <button type="button" data-action="next">Open next</button>
+          <button type="button" data-action="debug">Debug</button>
           <button type="button" data-action="export">Export report</button>
           <button type="button" class="danger" data-action="clear">Clear queue</button>
         </div>
@@ -144,6 +144,7 @@
     if (action === "done") finishCurrent("imported");
     if (action === "skip") finishCurrent("skipped");
     if (action === "next") openNext();
+    if (action === "debug") showDebug();
     if (action === "export") exportReport();
     if (action === "clear") clearQueue();
   }
@@ -169,9 +170,8 @@
     const pageUrl = new URL(location.href);
     if (pageUrl.searchParams.has("type")) {
       pageUrl.searchParams.delete("type");
-      state.pendingImport = personKey(pageUrl.href);
       saveState();
-      setStatus("Opening the person fiche first, then I will retry import.");
+      setStatus("Opening the person fiche. When it loads, click Open import again.");
       location.href = pageUrl.href;
       return;
     }
@@ -252,6 +252,22 @@
     output.innerHTML = `<textarea readonly>${escapeHtml(toCsv(state.report))}</textarea>`;
   }
 
+  function showDebug() {
+    const output = document.querySelector(`#${PANEL_ID} [data-output]`);
+    const candidates = findActionCandidates();
+    const debug = {
+      version: "0.1.2",
+      url: location.href,
+      normalizedUrl: normalizePersonUrl(location.href),
+      current,
+      parents,
+      queueLength: state.queue.length,
+      doneCount: Object.keys(state.done).length,
+      candidates,
+    };
+    output.innerHTML = `<textarea readonly>${escapeHtml(JSON.stringify(debug, null, 2))}</textarea>`;
+  }
+
   function clearQueue() {
     if (!confirm("Clear the genadup queue and report?")) return;
     localStorage.removeItem(STORAGE_KEY);
@@ -295,22 +311,11 @@
   }
 
   function findImportLink() {
-    return Array.from(document.querySelectorAll("a[href], button"))
-      .filter((element) => !element.closest(`#${PANEL_ID}`))
-      .find((element) => {
-        const text = cleanText(element.textContent);
-        const href = element.href || "";
-        return (
-          /importer.*(mon|votre|un).*arbre/i.test(text) ||
-          /copier.*(mon|votre|un).*arbre/i.test(text) ||
-          /ajouter.*(mon|votre|un).*arbre/i.test(text) ||
-          /importer/i.test(href)
-        );
-      });
+    return actionElements().find((element) => isImportCandidate(element));
   }
 
   function findMenuButton(text) {
-    return Array.from(document.querySelectorAll("a, button")).find(
+    return actionElements().find(
       (element) => !element.closest(`#${PANEL_ID}`) && cleanText(element.textContent) === text
     );
   }
@@ -324,12 +329,39 @@
     element.click();
   }
 
-  function maybeContinuePendingImport() {
-    if (!state.pendingImport) return;
-    if (state.pendingImport !== personKey(location.href)) return;
-    state.pendingImport = null;
-    saveState();
-    setTimeout(openImport, 700);
+  function actionElements() {
+    return Array.from(document.querySelectorAll("a[href], button")).filter(
+      (element) => !element.closest(`#${PANEL_ID}`)
+    );
+  }
+
+  function isImportCandidate(element) {
+    const text = cleanText(element.textContent);
+    const href = element.href || "";
+    return (
+      /importer.*(mon|votre|un).*arbre/i.test(text) ||
+      /copier.*(mon|votre|un).*arbre/i.test(text) ||
+      /ajouter.*(mon|votre|un).*arbre/i.test(text) ||
+      /importer/i.test(href)
+    );
+  }
+
+  function findActionCandidates() {
+    return actionElements()
+      .map((element) => ({
+        tag: element.tagName.toLowerCase(),
+        text: cleanText(element.textContent),
+        href: element.href || "",
+        ariaLabel: element.getAttribute("aria-label") || "",
+        title: element.getAttribute("title") || "",
+        importCandidate: isImportCandidate(element),
+      }))
+      .filter((item) =>
+        /import|importer|copier|copy|ajouter|arbre|plus|lia|lien/i.test(
+          `${item.text} ${item.href} ${item.ariaLabel} ${item.title}`
+        )
+      )
+      .slice(0, 80);
   }
 
   function setStatus(message) {
